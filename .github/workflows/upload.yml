@@ -1,62 +1,58 @@
-name: Upload Relaxing Videos to YouTube (Pexels)
+name: Auto Upload Relaxing Videos to YouTube (English Audience)
 
 on:
   schedule:
-    - cron: '0 9 * * *'    # Long video 1 (9 AM UTC)
-    - cron: '0 15 * * *'   # Long video 2 (3 PM UTC)
-    - cron: '0 18 * * *'   # Short 1 (6 PM UTC)
-    - cron: '0 22 * * *'   # Short 2 (10 PM UTC)
-  workflow_dispatch:        # Manual trigger if needed
+    - cron: '0 14 * * *'  # 10:00 AM NY
+    - cron: '0 19 * * *'  # 3:00 PM NY
+    - cron: '0 23 * * *'  # 7:00 PM NY
+    - cron: '0 3 * * *'   # 11:00 PM NY (next day)
+  workflow_dispatch:
 
 jobs:
   upload:
     runs-on: ubuntu-latest
-
     steps:
     - name: Checkout repo
       uses: actions/checkout@v4
 
-    - name: Install jq
+    - name: Install jq and ffmpeg
       run: |
-        sudo apt-get update -y
+        sudo apt-get update
         sudo apt-get install -y jq ffmpeg
 
-    - name: Download a random relaxing video with sound
+    - name: Download relaxing video from Pexels (with sound)
       env:
         PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
       run: |
-        echo "Searching for relaxing videos..."
-        curl -s -H "Authorization: $PEXELS_API_KEY" "https://api.pexels.com/videos/search?query=relaxing+nature+sound&per_page=20" > response.json
-        count=$(jq '.videos | length' response.json)
-        if [ "$count" -eq 0 ]; then
-          echo "No relaxing videos found." >&2
+        echo "Searching for relaxing videos with sound..."
+        curl -s -H "Authorization: $PEXELS_API_KEY" \
+          "https://api.pexels.com/videos/search?query=relaxing+with+sound&orientation=landscape&per_page=10" > response.json
+        COUNT=$(jq '.videos | length' response.json)
+        if [ "$COUNT" -eq 0 ]; then
+          echo "No videos found." >&2
           exit 1
         fi
-        index=$((RANDOM % count))
-        VIDEO_URL=$(jq -r ".videos[$index].video_files[] | select(.quality==\"hd\") | .link" response.json | head -n 1)
-        echo "Downloading relaxing video #$index ..."
-        curl -L "$VIDEO_URL" --output video_raw.mp4 --silent
-        ls -lh video_raw.mp4
+        INDEX=$((RANDOM % COUNT))
+        VIDEO_URL=$(jq -r ".videos[$INDEX].video_files[] | select(.quality==\"hd\") | .link" response.json | head -n 1)
+        echo "Selected: $VIDEO_URL"
+        curl -L "$VIDEO_URL" -o video.mp4
 
-        # Randomly decide if it’s a short or long video
-        LENGTH=$((RANDOM % 2))
-        if [ "$LENGTH" -eq 0 ]; then
-          echo "Creating long relaxing video (20 min)..."
-          ffmpeg -stream_loop 20 -i video_raw.mp4 -t 1200 -c copy video.mp4 -y
-        else
-          echo "Creating YouTube Short (60 sec)..."
-          ffmpeg -t 60 -i video_raw.mp4 -c copy video.mp4 -y
+        # Add sound if missing
+        if ! ffmpeg -i video.mp4 -af "volumedetect" -f null /dev/null 2>&1 | grep -q "mean_volume"; then
+          echo "⚠️ No sound found. Adding background music..."
+          curl -L -o bg.mp3 "https://files.freemusicarchive.org/storage-freemusicarchive-org/music/no_curator/Kai_Engel/At_The_End/07_-_Kai_Engel_-_July.mp3"
+          ffmpeg -i video.mp4 -i bg.mp3 -c:v copy -c:a aac -shortest output.mp4
+          mv output.mp4 video.mp4
         fi
         ls -lh video.mp4
 
-    - name: Get Access Token from Refresh Token
+    - name: Get Access Token
       id: get_token
       env:
         GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
         GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
         YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
       run: |
-        echo "Getting YouTube Access Token..."
         resp=$(curl -s \
           -d client_id="$GOOGLE_CLIENT_ID" \
           -d client_secret="$GOOGLE_CLIENT_SECRET" \
@@ -66,56 +62,44 @@ jobs:
         echo "$resp" > token.json
         ACCESS_TOKEN=$(jq -r .access_token token.json)
         if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then
-          echo "❌ Failed to get access token!"
+          echo "Failed to get access token" >&2
           cat token.json
           exit 1
         fi
         echo "access=$ACCESS_TOKEN" >> $GITHUB_OUTPUT
 
-    - name: Prepare metadata and start upload
+    - name: Initialize upload session
       id: init_upload
       env:
         ACCESS_TOKEN: ${{ steps.get_token.outputs.access }}
       run: |
-        TITLES=("Relaxing Nature Sounds 🌿" "Calming Ocean Waves 🌊" "Peaceful Forest Ambience 🍃" "Soothing River Flow 💧" "Meditation Background ✨" "Deep Sleep Nature Sounds 🌄")
-        DESCRIPTIONS=("Enjoy peaceful nature sounds and unwind 🌿"
-                      "Listen to calming ocean waves and feel peace 🌊"
-                      "Immerse yourself in forest ambience 🍃"
-                      "Relax to the gentle flow of a river 💧"
-                      "Perfect background for meditation ✨"
-                      "Natural sounds to help you sleep deeply 🌄")
-        index=$((RANDOM % 6))
-        TITLE=${TITLES[$index]}
-        DESC=${DESCRIPTIONS[$index]}
-
+        TITLES=("Relaxing Nature Sounds 🌿" "Calming Ocean Waves 🌊" "Peaceful Forest Ambience 🍃" "Soothing River Flow 💧" "Meditation Background ✨" "Deep Sleep Nature Sounds 🌄" "Rain and Thunder for Sleep 🌧️" "Gentle Waterfall Ambience 🏞️")
+        TITLE=${TITLES[$((RANDOM % ${#TITLES[@]}))]}
+        DESCRIPTION="Relax, meditate, or sleep with this peaceful nature video and calming sounds 🌿 Perfect for English-speaking audiences who love calmness and focus."
         METADATA=$(jq -n \
           --arg title "$TITLE" \
-          --arg desc "$DESC\n\nRelaxing nature video uploaded automatically 🌿\n#relaxing #nature #sleep #calm #meditation #ambient" \
-          '{"snippet": {"title": $title, "description": $desc, "tags":["relaxing","nature","sleep","calm","forest","waves","river","ASMR","ambient"], "categoryId":"22"}, "status": {"privacyStatus": "public"}}')
+          --arg desc "$DESCRIPTION" \
+          '{"snippet": {"title": $title, "description": $desc, "tags":["relaxing","nature","meditation","english","sleep"], "categoryId":"22"}, "status": {"privacyStatus": "public"}}')
 
-        echo "Creating upload session..."
         init_resp=$(curl -s -i -X POST "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status" \
           -H "Authorization: Bearer $ACCESS_TOKEN" \
           -H "Content-Type: application/json; charset=UTF-8" \
           -d "$METADATA")
-        UPLOAD_URL=$(grep -i '^Location:' init_resp | awk '{print $2}' | tr -d '\r\n')
+        echo "$init_resp" > init_resp.txt
+        UPLOAD_URL=$(grep -i '^Location:' init_resp.txt | awk '{print $2}' | tr -d '\r\n')
         if [ -z "$UPLOAD_URL" ]; then
-          echo "❌ Failed to get upload URL"
-          cat init_resp
+          echo "Failed to get upload URL. Response:"
+          cat init_resp.txt
           exit 1
         fi
         echo "upload_url=$UPLOAD_URL" >> $GITHUB_OUTPUT
 
-    - name: Upload video to YouTube
+    - name: Upload video
       env:
         UPLOAD_URL: ${{ steps.init_upload.outputs.upload_url }}
       run: |
-        echo "Uploading relaxing video to YouTube..."
-        curl -s -X PUT -T video.mp4 "$UPLOAD_URL" \
-          -H "Content-Type: application/octet-stream" \
-          -o upload_result.json
-        echo "Upload finished!"
+        echo "Uploading video..."
+        curl -s -X PUT -T video.mp4 "$UPLOAD_URL" -H "Content-Type: application/octet-stream" -o upload_result.json
         cat upload_result.json
-
-    - name: Done
-      run: echo "✅ Relaxing video uploaded successfully!"
+        echo "✅ Upload complete!"
+        
