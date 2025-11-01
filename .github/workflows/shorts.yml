@@ -1,0 +1,56 @@
+name: Upload Relaxing Shorts
+
+on:
+  schedule:
+    - cron: "0 16,20,0,4 * * *"  # 4 مرات يومياً متوزعة بين الفيديوهات الطويلة
+  workflow_dispatch:
+
+jobs:
+  upload_shorts:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq curl ffmpeg
+
+      - name: Get random short video
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+        run: |
+          curl -s -H "Authorization: $PEXELS_API_KEY" "https://api.pexels.com/videos/search?query=rain nature&per_page=10" > r.json
+          VIDEO_URL=$(jq -r '.videos[0].video_files[0].link' r.json)
+          curl -L "$VIDEO_URL" -o short.mp4
+          ffmpeg -ss 00:00:05 -i short.mp4 -t 00:00:50 -c copy final_short.mp4
+
+      - name: Get Token
+        id: token
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+        run: |
+          TOKEN=$(curl -s \
+            -d client_id=$GOOGLE_CLIENT_ID \
+            -d client_secret=$GOOGLE_CLIENT_SECRET \
+            -d refresh_token=$YT_REFRESH_TOKEN \
+            -d grant_type=refresh_token \
+            https://oauth2.googleapis.com/token | jq -r .access_token)
+          echo "access=$TOKEN" >> $GITHUB_OUTPUT
+
+      - name: Upload Short
+        env:
+          ACCESS_TOKEN: ${{ steps.token.outputs.access }}
+        run: |
+          TITLE=$(shuf -n1 -e "Rain Sounds for Sleep 🌧️" "Ocean Waves ASMR 🌊" "Relaxing Stream Flow 💧" "Peaceful Nature Clip 🍃")
+          DESC="Short relaxing moments 🌿 #shorts #relaxing #nature"
+          META=$(jq -n --arg t "$TITLE" --arg d "$DESC" '{"snippet": {"title": $t, "description": $d, "categoryId":"22"}, "status": {"privacyStatus": "public"}}')
+          INIT=$(curl -s -i -X POST "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/json; charset=UTF-8" \
+            -d "$META")
+          UPLOAD_URL=$(echo "$INIT" | grep -i 'Location:' | awk '{print $2}' | tr -d '\r\n')
+          curl -X PUT -T final_short.mp4 -H "Content-Type: video/*" "$UPLOAD_URL"
