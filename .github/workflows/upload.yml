@@ -1,10 +1,10 @@
-
 name: Upload video to YouTube (Pexels)
 
 on:
-  workflow_dispatch:   # يتيح تشغيل يدوي من Actions
-  # schedule:
-  #  - cron: '0 10 * * *'  # لو عايز تشغيل تلقائي مثلا كل يوم 10:00 UTC
+  schedule:
+    - cron: '0 9,15 * * *'   # 2 videos per day (9 AM & 3 PM UTC)
+    - cron: '0 18,22 * * *'  # 2 shorts per day (6 PM & 10 PM UTC)
+  workflow_dispatch:         # manual trigger if needed
 
 jobs:
   upload:
@@ -13,24 +13,26 @@ jobs:
     - name: Checkout repo
       uses: actions/checkout@v4
 
-    - name: Install jq (JSON parser)
+    - name: Install jq
       run: |
         sudo apt-get update
         sudo apt-get install -y jq
 
-    - name: Download a video from Pexels (relaxing)
+    - name: Download a random relaxing video with sound
       env:
         PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
       run: |
         echo "Searching Pexels..."
-        curl -s -H "Authorization: $PEXELS_API_KEY" "https://api.pexels.com/videos/search?query=relaxing&per_page=1" > response.json
-        if [ "$(jq -r '.videos | length' response.json)" = "0" ]; then
+        curl -s -H "Authorization: $PEXELS_API_KEY" "https://api.pexels.com/videos/search?query=relaxing+nature&per_page=20" > response.json
+        count=$(jq '.videos | length' response.json)
+        if [ "$count" -eq 0 ]; then
           echo "No videos found" >&2
           exit 1
         fi
-        VIDEO_URL=$(jq -r '.videos[0].video_files[0].link' response.json)
-        echo "Found video URL: $VIDEO_URL"
-        curl -L "$VIDEO_URL" -o video.mp4
+        index=$((RANDOM % count))
+        VIDEO_URL=$(jq -r ".videos[$index].video_files[] | select(.quality==\"hd\") | .link" response.json | head -n 1)
+        echo "Downloading video $index: $VIDEO_URL"
+        curl -L "$VIDEO_URL" --output video.mp4 --silent
         ls -lh video.mp4
 
     - name: Get Access Token from Refresh Token
@@ -54,7 +56,6 @@ jobs:
           cat token.json
           exit 1
         fi
-        echo "Got access token (hidden)."
         echo "access=$ACCESS_TOKEN" >> $GITHUB_OUTPUT
 
     - name: Start Resumable Upload Session (create video resource)
@@ -62,41 +63,45 @@ jobs:
       env:
         ACCESS_TOKEN: ${{ steps.get_token.outputs.access }}
       run: |
-        TITLE="Auto upload $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
-        DESCRIPTION="Uploaded automatically via GitHub Actions (Pexels source)."
+        TITLES=("Relaxing Nature Sounds 🌿" "Calming Ocean Waves 🌊" "Peaceful Forest Ambience 🍃" "Soothing River Flow 💧" "Meditation Background Sounds ✨" "Deep Relaxation Nature Video 🌄")
+        DESCRIPTIONS=("Enjoy the most relaxing nature sounds and calm your mind 🌿"
+                      "Listen to ocean waves and drift into peace 🌊"
+                      "Feel the peace of the forest ambience 🍃"
+                      "Let the sound of a river wash away your stress 💧"
+                      "Perfect video for meditation and deep focus ✨"
+                      "Natural background sounds for relaxation and sleep 🌄")
+        index=$((RANDOM % 6))
+        TITLE=${TITLES[$index]}
+        DESC=${DESCRIPTIONS[$index]}
+
         METADATA=$(jq -n \
           --arg title "$TITLE" \
-          --arg desc "$DESCRIPTION" \
-          '{"snippet": {"title": $title, "description": $desc, "tags":["relaxing","auto"], "categoryId":"22"}, "status": {"privacyStatus": "public"}}')
+          --arg desc "$DESC\n\nUploaded automatically by AI 🤖\n#relaxing #nature #meditation #sleep #calm #ambient" \
+          '{"snippet": {"title": $title, "description": $desc, "tags":["relaxing","nature","calm","meditation","soothing","sleep","ASMR","relax"], "categoryId":"22"}, "status": {"privacyStatus": "public"}}')
+
         echo "Metadata: $METADATA"
-        # Start the resumable upload session
         init_resp=$(curl -s -i -X POST "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status" \
           -H "Authorization: Bearer $ACCESS_TOKEN" \
           -H "Content-Type: application/json; charset=UTF-8" \
           -d "$METADATA")
         echo "$init_resp" > init_resp.txt
-        # Extract upload URL from response headers
         UPLOAD_URL=$(grep -i '^Location:' init_resp.txt | awk '{print $2}' | tr -d '\r\n')
         if [ -z "$UPLOAD_URL" ]; then
-          echo "Failed to get upload URL. Response:" >&2
+          echo "Failed to get upload URL" >&2
           cat init_resp.txt
           exit 1
         fi
         echo "upload_url=$UPLOAD_URL" >> $GITHUB_OUTPUT
 
-    - name: Upload video data (PUT)
+    - name: Upload video data
       env:
         UPLOAD_URL: ${{ steps.init_upload.outputs.upload_url }}
       run: |
-        echo "Uploading video (this may take a while)..."
+        echo "Uploading video (please wait)..."
         curl -s -X PUT -T video.mp4 "$UPLOAD_URL" -H "Content-Type: application/octet-stream" -o upload_result.json
         echo "Upload result:"
         cat upload_result.json
-        # Try to extract id
-        VIDEO_ID=$(jq -r '.id // .id' upload_result.json 2>/dev/null || true)
-        echo "Video ID: $VIDEO_ID"
-        echo "::set-output name=video_id::$VIDEO_ID"
 
     - name: Done
       run: |
-        echo "Workflow finished. Check previous steps for details."
+        echo "✅ Upload complete — Video posted successfully!"
