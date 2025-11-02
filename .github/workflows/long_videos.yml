@@ -1,4 +1,0 @@
-name: Prepare workspace
-  run: |
-    rm -rf work clips out final || true
-    mkdir -p work clips out final
