@@ -1,0 +1,12 @@
+name: Test workflow (show in Actions)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "✅ Test workflow is running - Hello from Youssef's repo"
