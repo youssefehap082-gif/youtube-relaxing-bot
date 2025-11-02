@@ -1,0 +1,34 @@
+name: Upload YouTube Shorts (4 times daily)
+
+on:
+  schedule:
+    - cron: "0 6,10,14,18 * * *"  # 4 مرات في اليوم (6 صباحًا - 10 صباحًا - 2 ظهرًا - 6 مساءً)
+  workflow_dispatch:
+
+jobs:
+  upload_shorts:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client moviepy requests
+
+      - name: Run upload script
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          COVERR_API_KEY: ${{ secrets.COVERR_API_KEY }}
+        run: |
+          python main.py --type shorts
