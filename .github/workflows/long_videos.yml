@@ -1,0 +1,126 @@
+name: Auto Upload Long Relaxing Videos (4/day)
+
+on:
+  schedule:
+    - cron: '0 09 * * *'  # 09:00 UTC
+    - cron: '0 15 * * *'  # 15:00 UTC
+    - cron: '0 21 * * *'  # 21:00 UTC
+    - cron: '0 03 * * *'  # 03:00 UTC
+  workflow_dispatch:
+
+jobs:
+  upload_long:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Debug info
+        run: |
+          echo "✅ Workflow started at $(date)"
+          pwd
+          ls -R
+
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq curl ffmpeg
+
+      - name: Prepare workspace
+        run: |
+          rm -rf work clips out final || true
+          mkdir -p work clips out final
+
+      - name: Fetch clips from sources
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          COVERR_API_KEY: ${{ secrets.COVERR_API_KEY }}
+        run: |
+          set -e
+          TOPICS=("relaxing" "rain" "ocean" "forest" "waterfall" "night" "river")
+          QUERY=${TOPICS[$RANDOM % ${#TOPICS[@]}]}
+          echo "Query: $QUERY"
+
+          urls=()
+
+          # Try Pexels
+          if [ -n "$PEXELS_API_KEY" ]; then
+            PEX=$(curl -s -H "Authorization: $PEXELS_API_KEY" "https://api.pexels.com/videos/search?query=$QUERY&per_page=15")
+            for i in $(seq 0 5); do
+              URL=$(echo "$PEX" | jq -r ".videos[$i].video_files[0].link")
+              if [ -n "$URL" ] && [ "$URL" != "null" ]; then urls+=("$URL"); fi
+            done
+          fi
+
+          # Fallback to Pixabay
+          if [ "${#urls[@]}" -lt 3 ] && [ -n "$PIXABAY_API_KEY" ]; then
+            PB=$(curl -s "https://pixabay.com/api/videos/?key=$PIXABAY_API_KEY&q=$QUERY&per_page=10")
+            for i in $(seq 0 5); do
+              URL=$(echo "$PB" | jq -r ".hits[$i].videos.medium.url")
+              if [ -n "$URL" ] && [ "$URL" != "null" ]; then urls+=("$URL"); fi
+            done
+          fi
+
+          if [ "${#urls[@]}" -eq 0 ]; then
+            echo "❌ No clips found, exiting."
+            exit 1
+          fi
+
+          echo "Found ${#urls[@]} clips, downloading..."
+          i=0
+          for u in "${urls[@]}"; do
+            if [ $i -ge 5 ]; then break; fi
+            curl -L "$u" -o "clips/clip_$i.mp4"
+            i=$((i+1))
+          done
+
+      - name: Build video (~10 min) and add audio
+        run: |
+          set -e
+          rm -f out/list.txt
+          TOTAL=0
+          for f in clips/*.mp4; do
+            ffmpeg -y -i "$f" -t 120 -c copy "out/trim_${f##*/}"
+            echo "file '$(pwd)/out/trim_${f##*/}'" >> out/list.txt
+            TOTAL=$((TOTAL + 120))
+            if [ "$TOTAL" -ge 600 ]; then break; fi
+          done
+          ffmpeg -y -f concat -safe 0 -i out/list.txt -c copy final/combined.mp4
+          curl -L -o bg.mp3 "https://assets.mixkit.co/music/preview/mixkit-relaxing-piano-628.mp3"
+          ffmpeg -y -i final/combined.mp4 -stream_loop -1 -i bg.mp3 -shortest -c:v copy -c:a aac -b:a 128k final_video.mp4
+          echo "✅ Video ready: final_video.mp4"
+
+      - name: Get YouTube access token
+        id: get_token
+        env:
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+        run: |
+          set -e
+          resp=$(curl -s -d client_id="$GOOGLE_CLIENT_ID" -d client_secret="$GOOGLE_CLIENT_SECRET" -d refresh_token="$YT_REFRESH_TOKEN" -d grant_type=refresh_token https://oauth2.googleapis.com/token)
+          ACCESS_TOKEN=$(echo "$resp" | jq -r .access_token)
+          if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then
+            echo "Failed to get access token"; echo "$resp"; exit 1
+          fi
+          echo "access=$ACCESS_TOKEN" >> $GITHUB_OUTPUT
+
+      - name: Upload video to YouTube
+        env:
+          ACCESS_TOKEN: ${{ steps.get_token.outputs.access }}
+        run: |
+          TITLE_LIST=("Relaxing Rain Sounds" "Peaceful Ocean Waves" "Soothing Forest Ambience" "Calm River Flow" "Sleep with Nature")
+          TITLE=${TITLE_LIST[$RANDOM % ${#TITLE_LIST[@]}]}
+          DESCRIPTION="Relax and sleep with calming sounds of nature 🌿 #relaxing #nature #sleep"
+          jq -n --arg t "$TITLE" --arg d "$DESCRIPTION" '{"snippet":{"title":$t,"description":$d,"tags":["relaxing","nature","sleep"],"categoryId":"22"},"status":{"privacyStatus":"public"}}' > meta.json
+          curl -s -D headers.txt -X POST "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" \
+            -H "Content-Type: application/json; charset=UTF-8" \
+            -d @meta.json
+          UPLOAD_URL=$(grep -i '^Location:' headers.txt | awk '{print $2}' | tr -d '\r\n')
+          if [ -z "$UPLOAD_URL" ]; then echo "Failed to get upload URL"; exit 1; fi
+          curl -s -X PUT -T final_video.mp4 -H "Content-Type: video/mp4" "$UPLOAD_URL"
+          echo "✅ Video uploaded successfully!"
