@@ -1,0 +1,46 @@
+name: Upload Very Long Videos (2x daily)
+
+on:
+  schedule:
+    - cron: "0 03 * * *"
+    - cron: "0 15 * * *"
+  workflow_dispatch:
+
+jobs:
+  upload_very_long:
+    runs-on: ubuntu-latest
+    timeout-minutes: 480
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y ffmpeg jq curl
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install --no-cache-dir requests
+
+      - name: Run main.py for very long videos
+        env:
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
+          COVERR_API_KEY: ${{ secrets.COVERR_API_KEY }}
+          GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+          GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+        run: |
+          if [ ! -f "./main.py" ]; then
+            echo "❌ main.py missing in repo root"; exit 1
+          fi
+          echo ">>> Running very long videos job"
+          python main.py --type very_long
