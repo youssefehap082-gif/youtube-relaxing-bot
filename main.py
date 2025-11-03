@@ -1,20 +1,13 @@
 #!/usr/bin/env python3
-# main.py — Calm Loop uploader (final full version)
+# main.py — Calm Loop uploader (fixed env parsing, upload retries, no channel handle in title)
 # Usage: python main.py --type shorts|long|very_long
 # Requirements on runner: ffmpeg, ffprobe, python3, pip install requests
 
-import os
-import sys
-import time
-import random
-import re
-import subprocess
-import requests
-import json
+import os, sys, time, random, re, subprocess, requests, json
 from pathlib import Path
 import math
 
-# ---------------- Config & Topics ----------------
+# ---------- Config ----------
 CHANNEL_NAME = "Calm Loop"
 CHANNEL_HANDLE = "CalmLoop-l6p"
 TOPICS = [
@@ -23,25 +16,10 @@ TOPICS = [
     "underwater diving", "birds", "sunset", "sunrise", "drone aerial", "night stars"
 ]
 
-# Title templates (kept short & clickable)
 TITLE_TEMPLATES = {
-    "shorts": [
-        "Instant Calm — {}",
-        "Quick Relaxation: {}",
-        "{} Mini Escape",
-        "{} Moment to Breathe",
-    ],
-    "long": [
-        "{} Ambience for Relaxation & Focus",
-        "Soothing {} Sounds — Relax & Sleep",
-        "Peaceful {} Ambience — Calm Your Mind",
-        "Gentle {} Flow — Meditation & Sleep",
-    ],
-    "very_long": [
-        "Extended {} Mix — Overnight Relaxation",
-        "{} Soundscape — Sleep & Deep Rest",
-        "Long {} Ambience for Full Night Sleep",
-    ]
+    "shorts": ["Instant Calm — {}", "Quick Relaxation: {}", "{} Mini Escape", "{} Moment to Breathe"],
+    "long": ["{} Ambience for Relaxation & Focus", "Soothing {} Sounds — Relax & Sleep", "Peaceful {} Ambience — Calm Your Mind", "Gentle {} Flow — Meditation & Sleep"],
+    "very_long": ["Extended {} Mix — Overnight Relaxation", "{} Soundscape — Sleep & Deep Rest", "Long {} Ambience for Full Night Sleep"]
 }
 
 DESCRIPTION_TEMPLATE = (
@@ -51,11 +29,10 @@ DESCRIPTION_TEMPLATE = (
 
 TAGS_BASE = ["relaxing","nature","sleep","meditation","ambient","calm","relax","soothing","ASMR","english"]
 
-# Fallback audio & birds
 MIXKIT_FALLBACK = "https://assets.mixkit.co/music/preview/mixkit-relaxing-piano-628.mp3"
 MIXKIT_BIRDS = os.environ.get("MIXKIT_BIRDS_URL", "")
 
-# ---------------- API endpoints ----------------
+# API endpoints
 PEXELS_SEARCH = "https://api.pexels.com/videos/search"
 PIXABAY_SEARCH = "https://pixabay.com/api/videos/"
 COVERR_SEARCH = "https://api.coverr.co/videos"
@@ -63,37 +40,55 @@ VIDEVO_SEARCH = "https://www.videvo.net/search/videos/"
 LIFE_OF_VIDS_SEARCH = "https://www.lifeofvids.com/?s="
 IA_ADVANCED_SEARCH = "https://archive.org/advancedsearch.php"
 
-# ---------------- Env / Secrets (must be set in GitHub secrets) ----------------
-PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY")
-PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY")
-COVERR_API_KEY = os.environ.get("COVERR_API_KEY")
-VIDEVO_API_KEY = os.environ.get("VIDEVO_API_KEY")
-GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID")
-GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET")
-YT_REFRESH_TOKEN = os.environ.get("YT_REFRESH_TOKEN")
+# ---------- Secrets (may be empty strings; handle safely) ----------
+PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY") or None
+PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY") or None
+COVERR_API_KEY = os.environ.get("COVERR_API_KEY") or None
+VIDEVO_API_KEY = os.environ.get("VIDEVO_API_KEY") or None
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID") or None
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET") or None
+YT_REFRESH_TOKEN = os.environ.get("YT_REFRESH_TOKEN") or None
 
-# ---------------- Runtime-configurable durations & thresholds ----------------
-SHORT_MAX_S = int(os.environ.get("SHORT_MAX_S", "600"))       # max seconds to allow for "shorts" job
-SHORT_THRESHOLD_SECONDS = int(os.environ.get("SHORT_THRESHOLD_SECONDS", "120"))  # <= this considered a Short (converted vertical)
-LONG_MIN_S  = int(os.environ.get("LONG_MIN_S", "120"))       # long min 2 minutes
-LONG_MAX_S  = int(os.environ.get("LONG_MAX_S", "1800"))      # long max 30 minutes
-VERY_LONG_MIN_S = int(os.environ.get("VERY_LONG_MIN_S", "3600"))  # very long min 1 hour
+# ---------- Safe env->int parser ----------
+def getenv_int(name, default):
+    v = os.environ.get(name)
+    if v is None or v == "":
+        return int(default)
+    try:
+        return int(v)
+    except Exception:
+        return int(default)
 
-# Audio threshold
-AUDIO_MIN_DB = float(os.environ.get("AUDIO_MIN_DB", "-60.0"))  # -60 dB default (lenient)
+# durations
+SHORT_MAX_S = getenv_int("SHORT_MAX_S", 600)            # max seconds allowed for 'shorts' job
+SHORT_THRESHOLD_SECONDS = getenv_int("SHORT_THRESHOLD_SECONDS", 120)  # <= this considered a Short (vertical)
+LONG_MIN_S  = getenv_int("LONG_MIN_S", 120)
+LONG_MAX_S  = getenv_int("LONG_MAX_S", 1800)
+VERY_LONG_MIN_S = getenv_int("VERY_LONG_MIN_S", 3600)
 
-# Other config
-MAX_DOWNLOAD_CANDIDATES = int(os.environ.get("MAX_CANDIDATES", "30"))
-TRY_COUNT = int(os.environ.get("TRY_COUNT", "30"))
+# audio threshold
+def getenv_float(name, default):
+    v = os.environ.get(name)
+    if v is None or v == "":
+        return float(default)
+    try:
+        return float(v)
+    except Exception:
+        return float(default)
 
-# ---------------- Paths ----------------
+AUDIO_MIN_DB = getenv_float("AUDIO_MIN_DB", -60.0)
+
+MAX_DOWNLOAD_CANDIDATES = getenv_int("MAX_CANDIDATES", 30)
+TRY_COUNT = getenv_int("TRY_COUNT", 30)
+
+# ---------- Paths ----------
 WORKDIR = Path("work")
 CLIPS_DIR = WORKDIR / "clips"
 OUT_DIR = WORKDIR / "out"
 FINAL_FILE = WORKDIR / "final_video.mp4"
 UPLOAD_LOG = Path("uploads_log.csv")
 
-# ---------------- Helpers ----------------
+# ---------- Helpers ----------
 def sh(cmd, capture=False):
     if capture:
         return subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT).decode('utf-8', errors='ignore')
@@ -156,7 +151,7 @@ def download_url_to(path, url, timeout=60):
                 f.write(chunk)
     return path
 
-# ---------------- Search functions ----------------
+# ---------- Search functions ----------
 def search_pexels(query, per_page=20):
     if not PEXELS_API_KEY:
         return []
@@ -271,7 +266,7 @@ def search_internet_archive(query, rows=20):
     except Exception as e:
         print("internet archive error", e); return []
 
-# ---------------- Audio/video processing ----------------
+# ---------- processing helpers ----------
 def normalize_audio(input_path, output_path):
     try:
         cmd = f'ffmpeg -y -i "{input_path}" -af "loudnorm=I=-16:LRA=11:TP=-1.5" -c:v copy -c:a aac -b:a 192k "{output_path}"'
@@ -313,7 +308,7 @@ def loop_to_target(src_path, target_seconds, out_path):
     except Exception as e:
         print("loop error", e); return False
 
-# ---------------- Hot-hashtags generator ----------------
+# ---------- hot hashtags ----------
 HOT_HASHTAGS_MAP = {
     "rain": ["#rain","#rainysounds","#rainambience","#relaxingrain"],
     "ocean": ["#ocean","#oceanwaves","#seasounds","#beachambience"],
@@ -328,12 +323,11 @@ HOT_HASHTAGS_MAP = {
     "droneaerial": ["#drone","#aerial","#cinematic"],
     "default": ["#relaxing","#nature","#sleep","#meditation"]
 }
-
 def get_hot_hashtags_for(topic):
     key = re.sub(r'\s+','',topic.lower())
     return HOT_HASHTAGS_MAP.get(key, HOT_HASHTAGS_MAP["default"])
 
-# ---------------- Core: pick and build ----------------
+# ---------- pick & download ----------
 def pick_and_download_for_type(video_type, target_min_s, target_max_s, try_count=TRY_COUNT):
     ensure_dirs()
     attempts = 0
@@ -372,7 +366,6 @@ def pick_and_download_for_type(video_type, target_min_s, target_max_s, try_count
         if not downloaded:
             print("No downloaded clips, retrying."); time.sleep(1); continue
 
-        # SHORTS
         if video_type == "shorts":
             for clip, dur, aud, mv in sorted(downloaded, key=lambda x: -x[1]):
                 if not aud: continue
@@ -387,7 +380,6 @@ def pick_and_download_for_type(video_type, target_min_s, target_max_s, try_count
                     except Exception as e: print("Trim short error:", e); continue
                 if not audio_ok(tmp, min_db=AUDIO_MIN_DB):
                     tmp.unlink(missing_ok=True); continue
-                # If short duration <= threshold, make vertical to boost chances of Shorts
                 if ffprobe_duration_seconds(tmp) <= SHORT_THRESHOLD_SECONDS:
                     vert = OUT_DIR / f"short_vert_{int(time.time())}.mp4"
                     if make_vertical_1080x1920(tmp, vert):
@@ -402,7 +394,6 @@ def pick_and_download_for_type(video_type, target_min_s, target_max_s, try_count
                 if p.is_file(): p.unlink(missing_ok=True)
             time.sleep(1); continue
 
-        # LONG: prefer single clip >= target_min_s with good audio and no long silence
         if video_type == "long":
             singles = [t for t in downloaded if t[1] >= target_min_s and t[2] and (t[3] is None or t[3] > AUDIO_MIN_DB)]
             singles = sorted(singles, key=lambda x: (-x[1], -(x[3] if x[3] is not None else -999)))
@@ -425,7 +416,6 @@ def pick_and_download_for_type(video_type, target_min_s, target_max_s, try_count
                         continue
             print("No suitable single long clip found — will try concat/loop fallback.")
 
-        # For both LONG and VERY_LONG: assemble acceptable clips
         acceptable = [t for t in downloaded if t[2] and (t[3] is None or t[3] > AUDIO_MIN_DB)]
         if not acceptable:
             print("No acceptable audio clips found this attempt, retrying.")
@@ -463,7 +453,6 @@ def pick_and_download_for_type(video_type, target_min_s, target_max_s, try_count
                     if overlay_birds_if_needed(norm_comb, birds_out):
                         if audio_ok(birds_out, min_db=AUDIO_MIN_DB):
                             return birds_out, topic
-            # if still insufficient audio: attach fallback bg and loop to target
             if not audio_ok(combined, min_db=AUDIO_MIN_DB):
                 bg = OUT_DIR / "bg.mp3"
                 download_url_to(bg, MIXKIT_FALLBACK)
@@ -482,7 +471,6 @@ def pick_and_download_for_type(video_type, target_min_s, target_max_s, try_count
                 else:
                     return combined, topic
 
-        # not enough total but at least one acceptable -> loop best clip
         if len(acceptable) > 0:
             best = sorted(acceptable, key=lambda x: (-x[1], x[3] if x[3] is not None else 0))[0]
             best_clip = best[0]
@@ -493,20 +481,19 @@ def pick_and_download_for_type(video_type, target_min_s, target_max_s, try_count
                     return loop_out, topic
             print("Loop fallback failed; retrying.")
             for p in CLIPS_DIR.glob("*"): p.unlink(missing_ok=True)
-            for p in OUT_DIR.glob("*"):
+            for p in OUT_DIR.glob("*"): 
                 if p.is_file(): p.unlink(missing_ok=True)
             time.sleep(1)
             continue
 
-        # cleanup & retry
         for p in CLIPS_DIR.glob("*"): p.unlink(missing_ok=True)
-        for p in OUT_DIR.glob("*"):
+        for p in OUT_DIR.glob("*"): 
             if p.is_file(): p.unlink(missing_ok=True)
         time.sleep(1)
 
     return None, None
 
-# ---------------- Google OAuth & Upload ----------------
+# ---------- upload with retries ----------
 def get_access_token():
     if not (GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET and YT_REFRESH_TOKEN):
         raise Exception("Missing Google OAuth env vars.")
@@ -523,35 +510,50 @@ def get_access_token():
     j = r.json()
     return j.get("access_token")
 
-def upload_to_youtube(file_path, title, description, tags, privacy="public", categoryId="22"):
-    print(f"[upload] Uploading {file_path} as {title}")
-    token = get_access_token()
-    metadata = {"snippet":{"title":title,"description":description,"tags":tags,"categoryId":categoryId},"status":{"privacyStatus":privacy}}
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=UTF-8"}
-    resp = requests.post("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status", headers=headers, data=json.dumps(metadata), timeout=30)
-    upload_url = resp.headers.get("Location") or resp.headers.get("location")
-    if not upload_url:
-        print("Create session failed, status:", resp.status_code, "body:", resp.text)
-        raise Exception("No upload URL returned by YouTube.")
-    with open(file_path, "rb") as f:
-        upload_resp = requests.put(upload_url, data=f, headers={"Content-Type":"application/octet-stream"}, timeout=3600)
-    if upload_resp.status_code not in (200,201):
-        print("Upload failed:", upload_resp.status_code, upload_resp.text[:800])
-        raise Exception("Upload failed.")
-    try:
-        resj = upload_resp.json(); video_id = resj.get("id")
-    except Exception:
-        video_id = None
-    return video_id
+def upload_to_youtube(file_path, title, description, tags, privacy="public", max_attempts=3):
+    last_exc = None
+    for attempt in range(1, max_attempts+1):
+        try:
+            print(f"[upload] Attempt {attempt} to upload {file_path}")
+            token = get_access_token()
+            metadata = {"snippet":{"title":title,"description":description,"tags":tags,"categoryId":"22"},"status":{"privacyStatus":privacy}}
+            headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=UTF-8"}
+            resp = requests.post("https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status", headers=headers, data=json.dumps(metadata), timeout=30)
+            upload_url = resp.headers.get("Location") or resp.headers.get("location")
+            if not upload_url:
+                print("Create session failed (status):", resp.status_code, resp.text)
+                raise Exception("No upload URL from YouTube.")
+            # stream upload (may be large) — use streaming put
+            with open(file_path, "rb") as f:
+                upload_resp = requests.put(upload_url, data=f, headers={"Content-Type":"application/octet-stream"}, timeout=3600)
+            if upload_resp.status_code not in (200,201):
+                print("Upload returned non-OK:", upload_resp.status_code, upload_resp.text[:800])
+                raise Exception(f"Upload failed status {upload_resp.status_code}")
+            try:
+                resj = upload_resp.json(); video_id = resj.get("id")
+            except Exception:
+                video_id = None
+            return video_id
+        except Exception as e:
+            print(f"[upload] attempt {attempt} error:", e)
+            last_exc = e
+            time.sleep(3 * attempt)
+            continue
+    raise last_exc
 
-# ---------------- Titles / Description / Tags (new smart version) ----------------
+# ---------- Titles/Description/Tags ----------
+HOT_HASHTAGS_MAP = {
+    "rain": ["#rain","#rainysounds","#rainambience","#relaxingrain"],
+    "ocean": ["#ocean","#oceanwaves","#seasounds","#beachambience"],
+    "forest": ["#forest","#forestambience","#birds","#nature"],
+    "waterfall": ["#waterfall","#waterfalls","#nature"],
+    "default": ["#relaxing","#nature","#sleep","#meditation"]
+}
+def get_hot_hashtags_for(topic):
+    key = re.sub(r'\s+','',topic.lower())
+    return HOT_HASHTAGS_MAP.get(key, HOT_HASHTAGS_MAP["default"])
+
 def choose_title_desc(video_type, duration_seconds, topic):
-    """
-    Generates title, description, tags with hot hashtags and CTA.
-    - title: no duration, emoji, includes channel handle if space.
-    - description: CTA (subscribe, bell), short pitch, hot hashtags line.
-    - tags: list up to 20 tags including hot tags for topic.
-    """
     topic_clean = topic.title()
     emoji_map = {
         "Rain":"🌧️","Ocean":"🌊","Forest":"🌿","Waterfall":"💧","Snow":"❄️","Clouds":"☁️",
@@ -559,36 +561,27 @@ def choose_title_desc(video_type, duration_seconds, topic):
         "Campfire":"🔥","Underwater Diving":"🤿","Birds":"🐦","Sunset":"🌇","Sunrise":"🌅",
         "Drone Aerial":"🚁","Night Stars":"✨","Relaxing":"🧘"
     }
-    key = re.sub(r'\s+','', topic_clean).lower()
     emoji = emoji_map.get(topic_clean, "🌿")
 
-    # select template
     if video_type == "shorts":
         template = random.choice(TITLE_TEMPLATES["shorts"])
         base_title = template.format(topic_clean)
-        if len(base_title) < 60:
-            suffix = random.choice(["✨","💤","🌿"])
-            title = f"{emoji} {base_title} {suffix}"
-        else:
-            title = f"{emoji} {base_title}"
+        title = f"{emoji} {base_title} {random.choice(['✨','💤','🌿'])}"
     elif video_type == "long":
         template = random.choice(TITLE_TEMPLATES["long"])
+        minutes = max(1, int(math.ceil(duration_seconds/60.0)))
         title = f"{emoji} {template.format(topic_clean)}"
     else:
         template = random.choice(TITLE_TEMPLATES["very_long"])
         title = f"{emoji} {template.format(topic_clean)}"
 
-    # Add channel handle if space and keep reasonably short
-    if len(title) < 80:
-        title = f"{title} • @{CHANNEL_HANDLE}"
+    # NOTE: **do not** add channel handle to title per user's request
 
-    # Build hashtags: topic-specific hot tags + general
     hot = get_hot_hashtags_for(topic)
     general = ["#relaxing","#nature","#sleep","#meditation","#calm","#ambient","#relax","#soothing","#ASMR","#sleepmusic"]
     hashtags = list(dict.fromkeys(hot + general))[:12]
     hashtags_line = " ".join(hashtags)
 
-    # Build description with CTA (no Instagram — user said none)
     minutes = max(1, int(math.ceil(duration_seconds / 60.0)))
     use_line = ("Perfect for a quick calm break." if video_type=="shorts"
                 else "Great for studying, working, deep relaxation, and sleep." if video_type=="long"
@@ -600,7 +593,7 @@ def choose_title_desc(video_type, duration_seconds, topic):
         "👍 Like the video if it helped you relax and share it with someone who needs calm.",
         "🛎️ Turn on the notification bell to get new uploads.",
         "",
-        f"🎧 Best with headphones for full immersion.",
+        "🎧 Best with headphones for full immersion.",
         f"⏱️ Approx. duration: {minutes} minute(s). {use_line}",
         "",
         "—",
@@ -610,7 +603,6 @@ def choose_title_desc(video_type, duration_seconds, topic):
     ]
     description = "\n".join(description_lines)
 
-    # Build tags list for API: include base + hot + topic
     tags = TAGS_BASE.copy()
     for h in hot:
         tags.append(h.lstrip("#"))
@@ -620,17 +612,16 @@ def choose_title_desc(video_type, duration_seconds, topic):
             tags.append("shorts")
     if video_type == "very_long":
         tags.extend(["overnight","deep sleep"])
-    # dedupe & limit to 20
     tags = list(dict.fromkeys(tags))[:20]
-
     return title, description, tags
 
-# ---------------- main ----------------
+# ---------- Main ----------
 def main():
     if len(sys.argv) < 3 or sys.argv[1] != "--type":
         print("Usage: python main.py --type shorts|long|very_long"); sys.exit(1)
     vtype = sys.argv[2]
-    if vtype not in ("shorts","long","very_long"): print("Invalid type"); sys.exit(1)
+    if vtype not in ("shorts","long","very_long"):
+        print("Invalid type"); sys.exit(1)
     if vtype == "shorts":
         min_d, max_d = 5, SHORT_MAX_S
     elif vtype == "long":
@@ -638,29 +629,43 @@ def main():
     else:
         min_d, max_d = VERY_LONG_MIN_S, 3*60*60
 
-    print(f"[start] Building type={vtype} target {min_d}s - {max_d}s (AUDIO_MIN_DB={AUDIO_MIN_DB})")
+    print(f"[start] type={vtype} target {min_d}-{max_d}s (AUDIO_MIN_DB={AUDIO_MIN_DB})")
     ensure_dirs()
-    final, topic = pick_and_download_for_type(vtype, min_d, max_d, try_count=TRY_COUNT)
-    if not final:
-        print("Failed to produce final video — aborting."); sys.exit(1)
 
-    dur = ffprobe_duration_seconds(final)
-    print(f"[final] file={final} duration={dur}s audio_ok={audio_ok(final)}")
-    if not audio_ok(final):
-        print("Final video audio check failed — abort."); sys.exit(1)
+    attempts = 0
+    while attempts < TRY_COUNT:
+        attempts += 1
+        print(f"[main] build attempt {attempts}/{TRY_COUNT}")
+        final, topic = pick_and_download_for_type(vtype, min_d, max_d, try_count=6)
+        if not final:
+            print("[main] producer failed, trying again")
+            continue
+        dur = ffprobe_duration_seconds(final)
+        print(f"[main] produced file={final} dur={dur}s audio_ok={audio_ok(final)}")
+        if not audio_ok(final):
+            print("[main] audio check failed, removing file and retrying")
+            try: final.unlink(missing_ok=True)
+            except: pass
+            continue
+        title, desc, tags = choose_title_desc(vtype, dur, topic or "relaxing")
+        print("[main] Title:", title)
+        try:
+            vid = upload_to_youtube(final, title, desc, tags, privacy="public", max_attempts=3)
+            if not vid:
+                print("[main] upload returned no id, retrying full cycle")
+                continue
+            youtube_url = f"https://youtu.be/{vid}"
+            print("[done] Uploaded:", youtube_url)
+            with open(UPLOAD_LOG, "a") as f:
+                f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{vid},{title}\n")
+            return
+        except Exception as e:
+            print("[main] upload failed:", e)
+            # try again: produce a new video and upload
+            continue
 
-    title, desc, tags = choose_title_desc(vtype, dur, topic or "relaxing")
-    print("Title:", title)
-    try:
-        vid = upload_to_youtube(final, title, desc, tags, privacy="public")
-    except Exception as e:
-        print("Upload error:", e); sys.exit(1)
-    if not vid:
-        print("Upload finished but no video id returned."); sys.exit(1)
-    youtube_url = f"https://youtu.be/{vid}"
-    print("[done] Uploaded:", youtube_url)
-    with open(UPLOAD_LOG, "a") as f:
-        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{vid},{title}\n")
+    print("Reached TRY_COUNT without success — aborting.")
+    sys.exit(1)
 
 if __name__ == "__main__":
     main()
