@@ -1,15 +1,14 @@
-name: Upload Very Long Videos (2x daily)
+name: Upload Very Long Videos (weekly)
 
 on:
   schedule:
-    - cron: "0 03 * * *"
-    - cron: "0 15 * * *"
+    - cron: "0 03 * * 0"   # Sunday 03:00 UTC (once per week)
   workflow_dispatch:
 
 jobs:
   upload_very_long:
     runs-on: ubuntu-latest
-    timeout-minutes: 480
+    timeout-minutes: 720
 
     steps:
       - name: Checkout repository
@@ -35,9 +34,12 @@ jobs:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           COVERR_API_KEY: ${{ secrets.COVERR_API_KEY }}
+          VIDEVO_API_KEY: ${{ secrets.VIDEVO_API_KEY }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          MIXKIT_BIRDS_URL: ${{ secrets.MIXKIT_BIRDS_URL }}
+          VERY_LONG_MIN_S: ${{ secrets.VERY_LONG_MIN_S }}  # اختياري: افتراضي 3600 (ساعة)
         run: |
           if [ ! -f "./main.py" ]; then
             echo "❌ main.py missing in repo root"; exit 1
