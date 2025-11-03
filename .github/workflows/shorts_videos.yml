@@ -1,19 +1,28 @@
-name: Upload Shorts (6x daily)
+name: Upload Shorts (up to 15x daily)
 
 on:
   schedule:
-    - cron: "0 10 * * *"
-    - cron: "0 14 * * *"
-    - cron: "0 18 * * *"
-    - cron: "0 22 * * *"
+    - cron: "0 00 * * *"
     - cron: "0 02 * * *"
+    - cron: "0 04 * * *"
     - cron: "0 06 * * *"
+    - cron: "0 08 * * *"
+    - cron: "0 10 * * *"
+    - cron: "0 12 * * *"
+    - cron: "0 13 * * *"
+    - cron: "0 14 * * *"
+    - cron: "0 15 * * *"
+    - cron: "0 16 * * *"
+    - cron: "0 17 * * *"
+    - cron: "0 18 * * *"
+    - cron: "0 20 * * *"
+    - cron: "0 22 * * *"
   workflow_dispatch:
 
 jobs:
   upload_shorts:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Checkout repository
@@ -39,9 +48,12 @@ jobs:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           COVERR_API_KEY: ${{ secrets.COVERR_API_KEY }}
+          VIDEVO_API_KEY: ${{ secrets.VIDEVO_API_KEY }}
           GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
           GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          MIXKIT_BIRDS_URL: ${{ secrets.MIXKIT_BIRDS_URL }}
+          SHORT_MAX_S: ${{ secrets.SHORT_MAX_S }}        # اختياري، أقصى مدة للشورت بالثواني (مثلاً 600)
         run: |
           if [ ! -f "./main.py" ]; then
             echo "❌ main.py missing in repo root"; exit 1
