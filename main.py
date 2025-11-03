@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-# main.py — Calm Loop uploader
-# Usage: python main.py --type shorts|long|very_long
-# Requires: ffmpeg, ffprobe, python requests
+# main.py — Calm Loop uploader (updated: Shorts vertical + strict audio)
 
 import os
 import sys
@@ -10,6 +8,7 @@ import requests
 import json
 import time
 import random
+import re
 from pathlib import Path
 
 # ---------------- Config ----------------
@@ -81,7 +80,7 @@ UPLOAD_LOG = Path("uploads_log.csv")
 # ---------------- utilities ----------------
 def sh(cmd, capture=False):
     if capture:
-        return subprocess.check_output(cmd, shell=True).decode('utf-8', errors='ignore')
+        return subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT).decode('utf-8', errors='ignore')
     else:
         subprocess.check_call(cmd, shell=True)
 
@@ -97,12 +96,38 @@ def ffprobe_duration_seconds(path):
     except Exception:
         return 0.0
 
-def has_audio(path):
+def has_audio_stream(path):
     try:
         out = sh(f'ffprobe -v error -select_streams a -show_entries stream=codec_type -of csv=p=0 "{path}"', capture=True)
         return bool(out.strip())
     except Exception:
         return False
+
+def audio_mean_volume_db(path):
+    """
+    Returns mean volume in dB (float) or None if cannot detect.
+    Uses ffmpeg volumedetect filter.
+    """
+    try:
+        out = sh(f'ffmpeg -hide_banner -nostats -i "{path}" -af "volumedetect" -f null /dev/null', capture=True)
+        m = re.search(r'mean_volume:\s*([-0-9\.]+)\s*dB', out)
+        if m:
+            return float(m.group(1))
+    except Exception as e:
+        # sometimes ffmpeg prints to stderr and subprocess captures, but if fails return None
+        # print("audio_mean_volume error:", e)
+        return None
+    return None
+
+def audio_ok(path, min_db=-50.0):
+    # require audio stream and mean volume > min_db
+    if not has_audio_stream(path):
+        return False
+    mv = audio_mean_volume_db(path)
+    if mv is None:
+        # if cannot measure, assume false (strict)
+        return False
+    return mv > min_db
 
 def download_url_to(path, url, timeout=60):
     print(f"Downloading {url} → {path}")
@@ -130,9 +155,9 @@ def search_pexels(query, per_page=15):
         results = []
         for v in videos:
             files = v.get("video_files", [])
-            files_sorted = sorted(files, key=lambda x: (0 if x.get('quality')=='hd' else 1, -int(x.get('width',0))))
+            # pick highest width
+            files_sorted = sorted(files, key=lambda x: int(x.get('width',0)), reverse=True)
             if files_sorted:
-                # take highest quality link
                 results.append(files_sorted[0].get('link'))
         return results
     except Exception as e:
@@ -153,7 +178,6 @@ def search_pixabay(query, per_page=20):
         results = []
         for h in hits:
             vids = h.get("videos", {})
-            # prefer medium -> large -> tiny
             for key in ("medium","large","tiny"):
                 if key in vids and vids[key].get("url"):
                     results.append(vids[key]["url"])
@@ -183,8 +207,23 @@ def search_coverr():
         print("Coverr search error:", e)
         return []
 
+# ---------------- Video processing helpers ----------------
+def make_vertical_1080x1920(input_path, output_path):
+    """
+    Convert/pad/crop input video to vertical 1080x1920.
+    Uses letterbox/pad (center) after scaling to width 1080.
+    """
+    # scale to width 1080 keeping aspect, then pad to 1080x1920
+    cmd = f'ffmpeg -y -i "{input_path}" -vf "scale=1080:-2, pad=1080:1920:(ow-iw)/2:(oh-ih)/2" -c:v libx264 -preset veryfast -crf 23 -c:a aac -b:a 128k "{output_path}"'
+    try:
+        sh(cmd)
+        return True
+    except Exception as e:
+        print("make_vertical error:", e)
+        return False
+
 # ---------------- Build & selection ----------------
-def pick_and_download_for_type(video_type, target_min_s, target_max_s, try_count=20):
+def pick_and_download_for_type(video_type, target_min_s, target_max_s, try_count=25):
     ensure_dirs()
     attempts = 0
     while attempts < try_count:
@@ -203,9 +242,9 @@ def pick_and_download_for_type(video_type, target_min_s, target_max_s, try_count
             time.sleep(2)
             continue
 
-        # download a few candidates
+        # download candidates
         downloaded = []
-        for i, url in enumerate(candidates[:12]):
+        for i, url in enumerate(candidates[:15]):
             clip_path = CLIPS_DIR / f"clip_{attempts}_{i}.mp4"
             try:
                 download_url_to(clip_path, url)
@@ -213,14 +252,14 @@ def pick_and_download_for_type(video_type, target_min_s, target_max_s, try_count
                 print("Download failed:", e)
                 continue
             dur = ffprobe_duration_seconds(clip_path)
-            audio = has_audio(clip_path)
-            print(f"Downloaded {clip_path} dur={dur}s audio={audio}")
+            audio_stream = has_audio_stream(clip_path)
+            mean_v = audio_mean_volume_db(clip_path) if audio_stream else None
+            print(f"Downloaded {clip_path} dur={dur}s audio_stream={audio_stream} mean_v={mean_v}")
             if dur <= 0:
                 clip_path.unlink(missing_ok=True)
                 continue
-            downloaded.append((clip_path, dur, audio))
-            # if enough small clips -> break
-            if len(downloaded) >= 8:
+            downloaded.append((clip_path, dur, audio_stream, mean_v))
+            if len(downloaded) >= 10:
                 break
 
         if not downloaded:
@@ -228,57 +267,69 @@ def pick_and_download_for_type(video_type, target_min_s, target_max_s, try_count
             time.sleep(1)
             continue
 
-        # SHORTS: pick single clip with audio and trim to <=60s
+        # SHORTS handling
         if video_type == "shorts":
-            candidates_with_audio = [t for t in downloaded if t[2]]
-            # prefer those with reasonable length >=15s
-            candidates_with_audio = sorted(candidates_with_audio, key=lambda x: -x[1])
-            for clip, dur, _ in candidates_with_audio:
-                if dur < 4:
+            # pick first clip with audio and adequate loudness
+            for clip, dur, aud, mv in sorted(downloaded, key=lambda x: -x[1]):
+                if not aud:
                     continue
+                if mv is None or mv <= -50.0:
+                    print(f"Clip {clip} mean_volume={mv} dB too low, skipping.")
+                    continue
+                # trim to <=60s
                 target = min(int(dur), 60)
-                if target < 10:
-                    target = min(10, int(dur))
-                outp = OUT_DIR / f"short_{int(time.time())}.mp4"
+                if target < 6:
+                    continue
+                tmp = OUT_DIR / f"short_trim_{int(time.time())}.mp4"
                 try:
-                    sh(f'ffmpeg -y -i "{clip}" -t {target} -c copy "{outp}"')
+                    sh(f'ffmpeg -y -i "{clip}" -t {target} -c copy "{tmp}"')
                 except Exception:
                     try:
-                        sh(f'ffmpeg -y -i "{clip}" -ss 0 -t {target} -c copy "{outp}"')
+                        sh(f'ffmpeg -y -i "{clip}" -ss 0 -t {target} -c copy "{tmp}"')
                     except Exception as e:
-                        print("ffmpeg short trim error:", e)
+                        print("Trim short error:", e)
                         continue
-                if has_audio(outp):
-                    return outp
-                else:
-                    print("Trimmed short has no audio, trying next clip.")
-            print("No suitable short found, retrying topic.")
-            # cleanup
+                # ensure audio loud enough after trimming
+                if not audio_ok(tmp, min_db=-50.0):
+                    print("Trimmed short audio fail, skipping.")
+                    tmp.unlink(missing_ok=True)
+                    continue
+                # ensure vertical for Shorts (convert/pad)
+                vert = OUT_DIR / f"short_vert_{int(time.time())}.mp4"
+                if not make_vertical_1080x1920(tmp, vert):
+                    print("Vertical conversion failed, using trimmed file as-is.")
+                    vert = tmp
+                return vert
+
+            print("No suitable short clip found for this attempt — retrying.")
+            # cleanup downloaded
             for p in CLIPS_DIR.glob("*"):
+                try: p.unlink()
+                except: pass
+            for p in OUT_DIR.glob("*"):
                 try: p.unlink()
                 except: pass
             time.sleep(1)
             continue
 
-        # LONG and VERY_LONG: assemble by concatenating several audio+video clips
-        # keep only clips with audio
-        with_audio = [t for t in downloaded if t[2]]
+        # LONG / VERY_LONG handling
+        with_audio = [t for t in downloaded if t[2] and (t[3] is None or t[3] > -50.0)]
         if not with_audio:
-            print("No downloaded clips with audio, retrying.")
+            print("No downloaded clips with acceptable audio, retrying.")
             for p in CLIPS_DIR.glob("*"):
                 try: p.unlink()
                 except: pass
             time.sleep(1)
             continue
 
-        # create trimmed segments (max 180s each) and concat until reach target_min_s
+        # create trimmed segments and concat until reach min target
         list_txt = OUT_DIR / "list.txt"
         if list_txt.exists():
             list_txt.unlink()
         total = 0
         idx = 0
-        for clip, dur, _ in with_audio:
-            trim_t = min(dur, 180)
+        for clip, dur, aud, mv in with_audio:
+            trim_t = min(dur, 180)  # max 3 min per segment
             out_trim = OUT_DIR / f"trim_{attempts}_{idx}.mp4"
             try:
                 sh(f'ffmpeg -y -i "{clip}" -t {int(trim_t)} -c copy "{out_trim}"')
@@ -318,9 +369,9 @@ def pick_and_download_for_type(video_type, target_min_s, target_max_s, try_count
             sh(f'ffmpeg -y -i "{combined}" -t {target_max_s} -c copy "{trimmed}"')
             combined = trimmed
 
-        # ensure audio present
-        if not has_audio(combined):
-            print("Combined has no audio — will attach fallback music.")
+        # ensure audio exists
+        if not audio_ok(combined, min_db=-50.0):
+            print("Combined has insufficient audio — will attach fallback music.")
             bg = OUT_DIR / "bg.mp3"
             try:
                 download_url_to(bg, MIXKIT_FALLBACK)
@@ -330,7 +381,6 @@ def pick_and_download_for_type(video_type, target_min_s, target_max_s, try_count
                 print("Failed attaching fallback:", e)
                 continue
         else:
-            # move/copy to final
             try:
                 if FINAL_FILE.exists():
                     FINAL_FILE.unlink()
@@ -351,19 +401,15 @@ def get_access_token():
         "refresh_token": YT_REFRESH_TOKEN,
         "grant_type": "refresh_token"
     }
-    try:
-        r = requests.post("https://oauth2.googleapis.com/token", data=data, timeout=30)
-    except Exception as e:
-        print("Token request error:", e)
-        raise
+    r = requests.post("https://oauth2.googleapis.com/token", data=data, timeout=30)
     if r.status_code != 200:
         print("Token request failed:", r.status_code, r.text)
         raise Exception("Failed to get access token.")
     j = r.json()
     return j.get("access_token")
 
-def upload_to_youtube(file_path, title, description, tags, privacy="public", categoryId="22"):
-    print(f"[upload] Starting upload: {file_path}")
+def upload_to_youtube(file_path, title, description, tags, privacy="public", categoryId="22", is_short=False):
+    print(f"[upload] Uploading {file_path} (short={is_short}) as {title}")
     token = get_access_token()
     metadata = {
         "snippet": {
@@ -380,32 +426,20 @@ def upload_to_youtube(file_path, title, description, tags, privacy="public", cat
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json; charset=UTF-8"
     }
-    try:
-        resp = requests.post(
-            "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
-            headers=headers, data=json.dumps(metadata), timeout=30
-        )
-    except Exception as e:
-        print("Create upload session error:", e)
-        raise
-
-    # Accept 200 or 201 and require Location header
+    resp = requests.post(
+        "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status",
+        headers=headers, data=json.dumps(metadata), timeout=30
+    )
     upload_url = resp.headers.get("Location") or resp.headers.get("location")
     if not upload_url:
         print("Create session failed, status:", resp.status_code, "body:", resp.text, "headers:", resp.headers)
         raise Exception("No upload URL returned by YouTube.")
     print("Upload URL obtained, uploading file (may take long)...")
-    # perform upload PUT with chunked streaming if needed
-    try:
-        with open(file_path, "rb") as f:
-            upload_resp = requests.put(upload_url, data=f, headers={"Content-Type":"application/octet-stream"}, timeout=1200)
-    except Exception as e:
-        print("Upload error:", e)
-        raise
+    with open(file_path, "rb") as f:
+        upload_resp = requests.put(upload_url, data=f, headers={"Content-Type":"application/octet-stream"}, timeout=1200)
     if upload_resp.status_code not in (200,201):
         print("Upload failed:", upload_resp.status_code, upload_resp.text[:800])
         raise Exception("Upload failed.")
-    # try parse response json
     try:
         resj = upload_resp.json()
         video_id = resj.get("id")
@@ -418,10 +452,14 @@ def upload_to_youtube(file_path, title, description, tags, privacy="public", cat
 def choose_title_desc(video_type, duration_seconds):
     templates = TITLE_TEMPLATES.get(video_type, TITLE_TEMPLATES["long"])
     title = random.choice(templates)
-    # 40% chance to add emoji suffix
-    suffixes = ["✨", "🌿", "🌊", "🌙", "💤"]
-    if random.random() < 0.4:
-        title = f"{title} {random.choice(suffixes)}"
+    if video_type == "shorts":
+        # ensure #shorts present
+        if "#shorts" not in title.lower():
+            title = f"{title} #shorts"
+    else:
+        # random emoji suffix
+        if random.random() < 0.4:
+            title = f"{title} {random.choice(['✨','🌿','🌊','🌙','💤'])}"
 
     minutes = max(1, int(duration_seconds // 60))
     if video_type == "shorts":
@@ -433,7 +471,10 @@ def choose_title_desc(video_type, duration_seconds):
 
     description = DESCRIPTION_TEMPLATE + f"\n\nDuration: approx {minutes} minutes. {use_line}\n\nHashtags: #relaxing #nature #sleep #meditation #calm"
     tags = TAGS_BASE.copy()
-    # add some context tags
+    # add #shorts tag if short
+    if video_type == "shorts" and "shorts" not in tags:
+        tags.append("shorts")
+    # contextual tags
     for kw in ["rain","ocean","forest","waterfall","snow","clouds","desert","mountain","river","campfire","night","winter"]:
         if kw in title.lower() and kw not in tags:
             tags.append(kw)
@@ -449,47 +490,45 @@ def main():
         print("Invalid type")
         sys.exit(1)
 
-    # targets in seconds
     if vtype == "shorts":
-        min_d, max_d = 15, 60
+        min_d, max_d = 5, 60   # short len limited to <=60s
     elif vtype == "long":
         min_d, max_d = 10*60, 50*60
     else:
-        min_d, max_d = 60*60, 3*60*60  # 1h - 3h
+        min_d, max_d = 60*60, 3*60*60
 
     print(f"[start] Building type={vtype} target {min_d}s - {max_d}s")
     ensure_dirs()
 
-    final = pick_and_download_for_type(vtype, min_d, max_d, try_count=25)
+    final = pick_and_download_for_type(vtype, min_d, max_d, try_count=30)
     if not final:
         print("Failed to produce final video — aborting.")
         sys.exit(1)
 
     dur = ffprobe_duration_seconds(final)
-    print(f"[final] file={final} duration={dur}s audio={has_audio(final)}")
+    print(f"[final] file={final} duration={dur}s audio_ok={audio_ok(final)}")
 
-    # strict audio check
-    if not has_audio(final):
-        print("Final video has no audio — aborting upload.")
+    if not audio_ok(final):
+        print("Final video audio check failed — abort.")
         sys.exit(1)
 
     title, desc, tags = choose_title_desc(vtype, dur)
     print("Title:", title)
     try:
-        video_id = upload_to_youtube(final, title, desc, tags, privacy="public")
+        is_short = (vtype == "shorts")
+        vid = upload_to_youtube(final, title, desc, tags, privacy="public", is_short=is_short)
     except Exception as e:
         print("Upload error:", e)
         sys.exit(1)
 
-    if not video_id:
-        print("Upload completed but no video id returned.")
+    if not vid:
+        print("Upload finished but no video id.")
         sys.exit(1)
 
-    youtube_url = f"https://youtu.be/{video_id}"
-    print("[done] Uploaded successfully:", youtube_url)
-    # log upload
+    youtube_url = f"https://youtu.be/{vid}"
+    print("[done] Uploaded:", youtube_url)
     with open(UPLOAD_LOG, "a") as f:
-        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{video_id},{title}\n")
+        f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')},{vid},{title}\n")
 
 if __name__ == "__main__":
     main()
