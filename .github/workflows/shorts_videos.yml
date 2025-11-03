@@ -2,18 +2,18 @@ name: Upload Shorts (6x daily)
 
 on:
   schedule:
-    - cron: "0 10 * * *"  # 10:00 UTC
-    - cron: "0 14 * * *"  # 14:00 UTC
-    - cron: "0 18 * * *"  # 18:00 UTC
-    - cron: "0 22 * * *"  # 22:00 UTC
-    - cron: "0 02 * * *"  # 02:00 UTC
-    - cron: "0 06 * * *"  # 06:00 UTC
+    - cron: "0 10 * * *"
+    - cron: "0 14 * * *"
+    - cron: "0 18 * * *"
+    - cron: "0 22 * * *"
+    - cron: "0 02 * * *"
+    - cron: "0 06 * * *"
   workflow_dispatch:
 
 jobs:
   upload_shorts:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
