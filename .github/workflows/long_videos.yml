@@ -2,12 +2,8 @@ name: Upload Long Videos (6x/day)
 
 on:
   schedule:
-    - cron: '0 1 * * *'
-    - cron: '0 5 * * *'
-    - cron: '0 9 * * *'
-    - cron: '0 13 * * *'
-    - cron: '0 17 * * *'
-    - cron: '0 21 * * *'
+    - cron: '0 03 * * *'  # 03:00 UTC
+    - cron: '0 15 * * *'  # 15:00 UTC
   workflow_dispatch:
 
 jobs:
