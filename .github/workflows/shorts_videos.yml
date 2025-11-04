@@ -2,18 +2,13 @@ name: Upload Shorts (10x/day)
 
 on:
   schedule:
-    - cron: '0 0 * * *'
-    - cron: '30 2 * * *'
-    - cron: '0 4 * * *'
-    - cron: '30 6 * * *'
-    - cron: '0 9 * * *'
-    - cron: '30 11 * * *'
-    - cron: '0 14 * * *'
-    - cron: '30 16 * * *'
-    - cron: '0 19 * * *'
-    - cron: '30 21 * * *'
+    - cron: '0 00 * * *'   # midnight UTC
+    - cron: '0 06 * * *'   # 06:00 UTC
+    - cron: '0 12 * * *'   # 12:00 UTC
+    - cron: '0 18 * * *'   # 18:00 UTC
   workflow_dispatch:
 
+  
 jobs:
   upload_shorts:
     runs-on: ubuntu-latest
